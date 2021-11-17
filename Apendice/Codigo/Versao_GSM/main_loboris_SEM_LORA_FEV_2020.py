@@ -1,0 +1,279 @@
+# Manuel Lameira
+# Licence under MIT
+# code for ESP32 with MicroPython Loboris
+
+# For ADC1 only GPIOs 32-39 can be used as ADC inputs.
+# For ADC2 gpios 4, 0, 2, 15, 13, 12, 14, 27, 25, 26 can be used as ADC inputs.
+
+# DTH22 --> ESP32
+# ---------------
+# GND   --> GND
+# VCC   --> 5v or 3.3v
+# DAT   --> digitalPin 14
+
+# DS18X20 --> ESP32
+# -----------------
+# VCC --> 3.3V with resistor
+# GND --> GND
+# DAT --> digitalPin 15
+
+# ph  --> ESP32
+# -----------------
+# VCC --> 5V or 3.3V with resisto0r
+# GND --> GND
+# DAT --> digitalPin 34
+
+# TDS --> ESP32
+# --------------------
+# VCC --> 3.3V
+# A   --> Analog Pin 35
+# GND --> GND
+
+# SR04  --> ESP32
+# --------------------
+# VCC   --> 5V or 3.3V ATENCION: on 3.3V the range decresses
+# Trig  --> DigitalPin 0
+# Echo  --> DigitalPin 2
+# GND   --> GND
+# Speed of Sound = 343 m/s in dry air at 20ºC
+
+# Channel ID 902540 - GSM/GPRS
+# KEY IL9VIMCHEXM9H3W4
+# GET https://api.thingspeak.com/update?api_key=IL9VIMCHEXM9H3W4&field1=0
+
+# Channel ID 985682 - LoRa & GSM
+# KEY 2IDFEOWYZCNDP7YW
+# GET https://api.thingspeak.com/update?api_key=2IDFEOWYZCNDP7YW&field1=0
+
+# Channel ID 1083373 - LoRa & LoRaWAN
+# KEY V62MN5J6XDQXV22Q
+# GET https://api.thingspeak.com/update?api_key=V62MN5J6XDQXV22Q&field1=0
+
+
+from machine import Pin, I2C, time_pulse_us, Onewire, DHT, ADC, deepsleep
+from time import sleep, sleep_ms, sleep_us
+
+import socket
+import machine
+import time
+import sys
+import gsm
+
+import json
+import urequests
+#import wlan
+
+#import DS1307
+
+# APN credentials (replace with yours)
+
+GSM_APN = 'Qu3d45_ESP32'  # Your APN
+GSM_USER = ''  # Your User
+GSM_PASS = ''  # Your Pass
+
+# Power on the GSM module
+
+GSM_PWR = machine.Pin(4, machine.Pin.OUT)
+GSM_RST = machine.Pin(5, machine.Pin.OUT)
+GSM_MODEM_PWR = machine.Pin(23, machine.Pin.OUT)
+
+GSM_PWR.value(0)
+GSM_RST.value(1)
+GSM_MODEM_PWR.value(1)
+
+# Init PPPoS
+
+# gsm.debug(True)  # Uncomment this to see more logs, investigate issues, etc.
+
+gsm.start(tx=27, rx=26, apn=GSM_APN, user=GSM_USER, password=GSM_PASS)
+
+sys.stdout.write('Waiting for AT command response...')
+for retry in range(20):
+    if gsm.atcmd('AT'):
+        break
+    else:
+        sys.stdout.write('.')
+        time.sleep_ms(5000)
+else:
+    raise Exception("Modem not responding!")
+print()
+
+print("Connecting to GSM...")
+gsm.connect()
+
+while gsm.status()[0] != 1:
+    pass
+
+print('IP:', gsm.ifconfig()[0])
+
+# GSM connection is complete.
+# You can now use modules like urequests, uPing, etc.
+
+
+def ReadDS18(ds18_sensor):
+
+    temp = ds18_sensor.convert_read()
+    return temp
+
+
+def Average(lst):
+    # function to get average of a list
+    return sum(lst) / len(lst)
+
+
+def ReadPH(voltage, temp):
+    # Calibration of probe
+    # PH4502 with 5V --> pH 4 acidVoltage = 1.432V and pH 7 (pot calibration) neutralVoltage = 2.5V
+    # with voltage divider --> pH 4 = 0.944V and pH 7 = 1.652V
+    acidVoltage = 0.9440
+    neutralVoltage = 1.6520
+
+    if temp >= 25:
+        temp_correction = 0.003 * (temp - 25)
+    else:
+        temp_correction = -0.003 * (temp - 25)
+
+    slope = (7.0 - 4.0) / (- (acidVoltage - neutralVoltage) / 3.0)
+    phValue = (slope * (voltage - neutralVoltage) /
+               3.0) + temp_correction
+
+    round(phValue, 2)
+    return phValue
+
+
+def ReadTDS(voltage, temp):
+    # Temperature compensation to 25 °C reference value
+    comp_Coefficente = 1 + 0.02 * (temp - 25)
+
+    # compensated electrical conductivity
+    comp_Voltage = voltage / comp_Coefficente
+
+    # convert voltage value to tds value
+    tds_value = ((133.42 * comp_Voltage**3) - (255.86 *
+                                               comp_Voltage**2) + (857.39 * comp_Voltage)) * 0.5
+
+    return tds_value
+
+
+time_between_readings = 300000  # 5 min in s
+
+#####----- RTC -----#####
+#i2c = I2C(sda=Pin(21), scl=Pin(22))
+#ds = DS1307.DS1307(i2c)
+
+#date_init = ds.DateTime()
+
+#####----- DS18X20 LOBORIS-----#####
+ds18_pin = Onewire(15)
+ds18_sensor = Onewire.ds18x20(ds18_pin, 0)
+
+ds18_temp = ReadDS18(ds18_sensor)
+print("Temperature: {0:.1f}°C".format(ds18_temp))
+
+#####----- ph -----#####
+pH = ADC(34)
+pH.atten(ADC.ATTN_11DB)  # Reading range: 3.3V
+
+# Creat empty list for value storage
+buf_ph = []
+sample_ph = range(10)
+
+for i in sample_ph:
+    buf_ph.append(pH.read())
+    sleep(1)
+
+avgValue_ph = Average(buf_ph)
+phVoltage = (avgValue_ph / (4095/3.3))
+
+pH_final = round(ReadPH(phVoltage, ds18_temp), 1)
+print(pH_final, "ph")
+
+#####----- TDS -----#####
+
+# Pin definition and ADC initialization
+tds = ADC(35)
+tds.atten(ADC.ATTN_11DB)  # Reading range: 3.3V
+
+buf_tds = []
+sample_tds = range(5)
+
+for i in sample_tds:
+    buf_tds.append(tds.read())
+    sleep(1)
+
+avgValue_tds = Average(buf_tds)
+tdsVoltage = (avgValue_tds * (3.3/4095))  # read the voltage in mV
+
+tdsValue = round(ReadTDS(tdsVoltage, ds18_temp), 3)
+print(tdsValue, " ppm")
+
+#####----- DHT22 -----#####
+dht_sensor = DHT(14, DHT.DHT2X)
+
+result, temperature, humidity = dht_sensor.read()
+
+x = result
+temp_dht22 = float(temperature)
+hum_dht22 = int(humidity)
+print(temp_dht22, " ºC")
+print(hum_dht22, " %")
+
+
+#####----- Water flow HC-SR04 -----#####
+
+trig = Pin(0, Pin.OUT)
+echo = Pin(2, Pin.IN)
+
+timeout_us = 25000  # no need to wait more then sensor's range limit (4,00 m)
+
+sensor_hight = 150  # cm
+
+trig.value(1)
+sleep_us(10)
+trig.value(0)
+
+duration = time_pulse_us(echo, 1, timeout_us)
+
+if duration < 0:
+    print("Out of range")
+    pass
+else:
+    # To calculate the distance we get the pulse_time and divide it by 2
+    # (the pulse walk the distance twice)
+    # the sound speed on air (343.2 m/s), that It's equivalent to
+    # 0.034320 cm/us that is 1cm each 29.1us
+    # Calculate the Speed of Sound in M/S
+    sound_comp = (331.4 + (0.606 * temp_dht22) + (0.0124 * hum_dht22))/10000
+#    print(sound_comp, " sound_comp")
+
+    distance = (duration / 2) * (sound_comp)  # m/us
+#    print(distance, " distance")
+
+    water_hight = sensor_hight - distance  # cm
+#    print(water_hight, " water_hight2")
+
+    water_hight_m = water_hight/100
+
+    discharge = (0.21579*(water_hight_m**(5/3))) / \
+        ((water_hight_m + 0.47918)**(2/3))
+    print(discharge, " m3/s")
+
+    # Use only with deep sleep
+
+    # date_flow_now = ds.DateTime()
+
+    # total_discharge = (date_flow_now - date_init) * discharge
+    # in seconds! the 40s is the time need to run the code
+    total_discharge = discharge * ((time_between_readings/60)+40)
+
+#####----- Thingspeak -----#####
+url_gateway = "https://api.thingspeak.com/update?api_key=IL9VIMCHEXM9H3W4&field1={}&field2={}&field3={}&field4={}&field5={}&field6={}&field7={}".format(
+    ds18_temp, pH_final, discharge, tdsValue, temp_dht22, hum_dht22, total_discharge)
+
+
+update_gateway = urequests.get(url_gateway)
+
+# sleep(time_between_readings)
+
+# sleep for 5 min (300000 miliseconds)
+deepsleep(time_between_readings)
